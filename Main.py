@@ -1,4 +1,8 @@
 import os
+os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'
+
+# ... all your other code starts after this (like import kivy, etc.)
+import os
 import json
 import base64
 import datetime
