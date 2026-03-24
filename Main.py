@@ -1,7 +1,21 @@
 import os
+
+# 1. SET THE GRAPHICS BACKEND FIRST
+# This tells Kivy to use DirectX to simulate OpenGL 2.0
 os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'
 
-# ... all your other code starts after this (like import kivy, etc.)
+# 2. NOW YOU CAN IMPORT KIVY
+from kivy.app import App
+from kivy.uix.label import Label
+
+# 3. YOUR NORMAL CODE GOES HERE
+class MyApp(App):
+    def build(self):
+        return Label(text="Hello! The graphics fix worked.")
+
+if __name__ == '__main__':
+    MyApp().run()
+
 import os
 import json
 import base64
