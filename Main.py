@@ -1,270 +1,197 @@
-import os
-import sys
 
-# --- 1. MANDATORY GRAPHICS FIX (FOR OPENGL 1.1) ---
-# This tells Kivy to look in your folder for the opengl32.dll first
-os.environ['KIVY_GL_BACKEND'] = 'sdl2'
-os.environ['KIVY_GRAPHICS'] = 'gles'
-os.environ['PATH'] = os.getcwd() + ";" + os.environ['PATH']
-
-import json
-import base64
-import datetime
-import io
-
-# Cryptography
+from flask import Flask, request, jsonify, render_template_string
+import os, base64, json, datetime
 from Crypto.Cipher import AES
-from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
+from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Hash import SHA256
 
-# Kivy UI
-from kivy.app import App
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.button import Button
-from kivy.uix.label import Label
-from kivy.uix.image import Image
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.screenmanager import ScreenManager, Screen, FadeTransition
-from kivy.core.window import Window
-from kivy.core.image import Image as CoreImage
+app = Flask(__name__)
 
-# Native File Picker
-from plyer import filechooser
-
-# --- Configuration & Paths ---
-SETTINGS_FILE = ".app_metadata.dat"
-VAULT_FOLDER = ".app_data_storage"
-KDF_ITERATIONS = 100000
+# ---------------- CONFIG ----------------
+SETTINGS_FILE = ".app_metadata.json"
+VAULT_FOLDER = "vault_storage"
+PASSCODE = "1234"
 
 if not os.path.exists(VAULT_FOLDER):
     os.makedirs(VAULT_FOLDER)
 
-# --- Logic: Cryptography ---
-class CryptoEngine:
-    @staticmethod
-    def derive_key(passcode, salt):
-        return PBKDF2(passcode, salt, dkLen=32, count=KDF_ITERATIONS, hmac_hash_module=SHA256)
+# ---------------- CRYPTO ----------------
+def derive_key(passcode, salt):
+    return PBKDF2(passcode, salt, dkLen=32, count=100000, hmac_hash_module=SHA256)
 
-    @staticmethod
-    def encrypt_file(in_filename, derived_key):
-        file_id = base64.urlsafe_b64encode(get_random_bytes(16)).decode().strip("=")
-        out_filename = os.path.join(VAULT_FOLDER, file_id + ".enc")
-        iv = get_random_bytes(12)
-        cipher = AES.new(derived_key, AES.MODE_GCM, nonce=iv)
+def encrypt_file(data, key):
+    file_id = base64.urlsafe_b64encode(get_random_bytes(8)).decode()
+    iv = get_random_bytes(12)
+    cipher = AES.new(key, AES.MODE_GCM, nonce=iv)
+    encrypted, tag = cipher.encrypt_and_digest(data)
 
-        with open(in_filename, "rb") as f_in, open(out_filename, "wb") as f_out:
-            encrypted_data, tag = cipher.encrypt_and_digest(f_in.read())
-            f_out.write(iv + tag + encrypted_data)
-        
-        # Keep original if you want, but usually vaults delete the original
-        # os.remove(in_filename) 
-        return file_id
+    with open(f"{VAULT_FOLDER}/{file_id}.bin", "wb") as f:
+        f.write(iv + tag + encrypted)
 
-    @staticmethod
-    def decrypt_file(file_id, derived_key):
-        in_filename = os.path.join(VAULT_FOLDER, file_id + ".enc")
-        with open(in_filename, "rb") as f_in:
-            iv, tag, data = f_in.read(12), f_in.read(16), f_in.read()
-        cipher = AES.new(derived_key, AES.MODE_GCM, nonce=iv)
-        return cipher.decrypt_and_verify(data, tag)
+    return file_id
 
-# --- Logic: App Settings ---
-class AppSettings:
-    def __init__(self):
-        self.salt = None
-        self.passcode = "1234" # Default passcode
-        self.encrypted_file_map = {}
-        self.load()
+def decrypt_file(file_id, key):
+    with open(f"{VAULT_FOLDER}/{file_id}.bin", "rb") as f:
+        iv = f.read(12)
+        tag = f.read(16)
+        data = f.read()
 
-    def load(self):
-        if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, "r") as f:
-                data = json.load(f)
-                self.salt = base64.b64decode(data['salt'])
-                self.passcode = data.get('passcode', "1234")
-                self.encrypted_file_map = data.get('file_map', {})
-        else:
-            self.salt = get_random_bytes(32)
-            self.save()
+    cipher = AES.new(key, AES.MODE_GCM, nonce=iv)
+    return cipher.decrypt_and_verify(data, tag)
 
-    def save(self):
-        data = {
-            'salt': base64.b64encode(self.salt).decode(),
-            'passcode': self.passcode,
-            'file_map': self.encrypted_file_map
-        }
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(data, f)
+# ---------------- SETTINGS ----------------
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        return json.load(open(SETTINGS_FILE))
+    else:
+        data = {"salt": base64.b64encode(get_random_bytes(16)).decode(), "files": {}}
+        json.dump(data, open(SETTINGS_FILE, "w"))
+        return data
 
-    def add_to_vault(self, original_path, file_id):
-        name = os.path.basename(original_path)
-        self.encrypted_file_map[file_id] = {
-            'name': name,
-            'added_on': datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-            'ext': name.split('.')[-1] if '.' in name else 'jpg'
-        }
-        self.save()
+def save_settings(data):
+    json.dump(data, open(SETTINGS_FILE, "w"))
 
-# --- UI: Calculator (Entry Point) ---
-class CalculatorScreen(Screen):
-    def __init__(self, settings, **kwargs):
-        super().__init__(**kwargs)
-        self.settings = settings
-        self.expression = ""
-        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        self.display = Label(text="0", font_size=50, size_hint_y=0.2, halign="right")
-        layout.add_widget(self.display)
+settings = load_settings()
+salt = base64.b64decode(settings["salt"])
+key = derive_key(PASSCODE, salt)
 
-        grid = GridLayout(cols=4, spacing=5)
-        btns = ['7', '8', '9', '/', '4', '5', '6', '*', '1', '2', '3', '-', 'C', '0', '.', '+']
-        for b in btns:
-            btn = Button(text=b, font_size=30, background_color=(0.1, 0.1, 0.1, 1))
-            btn.bind(on_press=self.on_click)
-            grid.add_widget(btn)
-        
-        eq = Button(text='=', font_size=30, size_hint_y=None, height=80, background_color=(0, 0.5, 0.8, 1))
-        eq.bind(on_press=self.on_eval)
-        
-        layout.add_widget(grid)
-        layout.add_widget(eq)
-        self.add_widget(layout)
+# ---------------- UI ----------------
+HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>RandyX Vault</title>
+<style>
+body {background:#111;color:white;text-align:center;font-family:Arial;}
+button{width:60px;height:60px;margin:5px;font-size:20px;}
+input{width:240px;height:40px;font-size:20px;text-align:right;}
+.hidden{display:none;}
+img{max-width:200px;margin-top:10px;}
+</style>
+</head>
+<body>
 
-    def on_click(self, inst):
-        if inst.text == 'C': self.expression = ""
-        else: self.expression += inst.text
-        self.display.text = self.expression or "0"
+<h2>🔥 Calculator</h2>
+<input id="display" readonly><br>
 
-    def on_eval(self, inst):
-        if self.expression == self.settings.passcode:
-            App.get_running_app().key = CryptoEngine.derive_key(self.settings.passcode, self.settings.salt)
-            self.manager.current = 'vault'
-        else:
-            try: self.display.text = str(eval(self.expression))
-            except: self.display.text = "Error"
-        self.expression = ""
+<div id="calc">
+<button onclick="p('7')">7</button>
+<button onclick="p('8')">8</button>
+<button onclick="p('9')">9</button>
+<button onclick="p('/')">/</button><br>
+<button onclick="p('4')">4</button>
+<button onclick="p('5')">5</button>
+<button onclick="p('6')">6</button>
+<button onclick="p('*')">*</button><br>
+<button onclick="p('1')">1</button>
+<button onclick="p('2')">2</button>
+<button onclick="p('3')">3</button>
+<button onclick="p('-')">-</button><br>
+<button onclick="p('0')">0</button>
+<button onclick="calc()">=</button>
+<button onclick="clr()">C</button>
+<button onclick="p('+')">+</button>
+</div>
 
-# --- UI: Vault (Secure Area) ---
-class VaultScreen(Screen):
-    def __init__(self, settings, **kwargs):
-        super().__init__(**kwargs)
-        self.settings = settings
-        
-        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        
-        # Header
-        header = BoxLayout(size_hint_y=None, height=50)
-        header.add_widget(Label(text="MABUZA VAULT", bold=True, color=(1,0,0,1)))
-        lock = Button(text="Lock", size_hint_x=None, width=80)
-        lock.bind(on_press=self.on_lock)
-        header.add_widget(lock)
-        layout.add_widget(header)
+<div id="vault" class="hidden">
+<h2>🔐 Vault</h2>
+<input type="file" id="file"><br><br>
+<button onclick="upload()">Hide File</button>
+<button onclick="lock()">Lock</button>
 
-        # Preview
-        self.preview = Image(size_hint_y=0.4)
-        layout.add_widget(self.preview)
+<div id="files"></div>
+<img id="preview">
+</div>
 
-        # File List
-        self.scroll = ScrollView(size_hint_y=0.4)
-        self.list_layout = GridLayout(cols=1, spacing=5, size_hint_y=None)
-        self.list_layout.bind(minimum_height=self.list_layout.setter('height'))
-        self.scroll.add_widget(self.list_layout)
-        layout.add_widget(self.scroll)
+<script>
+let exp="";
 
-        # Footer
-        add_btn = Button(text="HIDE NEW IMAGE", size_hint_y=None, height=60, background_color=(0, 0.6, 0.2, 1))
-        add_btn.bind(on_press=self.pick_file)
-        layout.add_widget(add_btn)
+function p(v){exp+=v;display.value=exp;}
+function clr(){exp="";display.value="";}
+function calc(){
+ fetch("/calc",{method:"POST",headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({exp:exp})})
+ .then(r=>r.json()).then(d=>{
+  if(d.vault){document.getElementById("calc").style.display="none";
+              document.getElementById("vault").classList.remove("hidden");
+              loadFiles();}
+  else display.value=d.result;
+  exp="";
+ });
+}
 
-        self.add_widget(layout)
+function upload(){
+ let f=document.getElementById("file").files[0];
+ let reader=new FileReader();
+ reader.onload=function(){
+  fetch("/upload",{method:"POST",headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({data:reader.result})})
+  .then(()=>loadFiles());
+ };
+ reader.readAsDataURL(f);
+}
 
-    def on_enter(self): self.refresh()
+function loadFiles(){
+ fetch("/files").then(r=>r.json()).then(d=>{
+  let html="";
+  for(let f in d){
+    html+=`<button onclick="view('${f}')">${d[f]}</button>`;
+  }
+  document.getElementById("files").innerHTML=html;
+ });
+}
 
-    def refresh(self):
-        self.list_layout.clear_widgets()
-        for fid, meta in self.settings.encrypted_file_map.items():
-            row = BoxLayout(size_hint_y=None, height=60, spacing=5)
-            btn = Button(text=f"{meta['name']}\n{meta['added_on']}", markup=True)
-            btn.bind(on_press=lambda x, f=fid: self.view(f))
-            del_btn = Button(text="X", size_hint_x=None, width=50, background_color=(0.8,0,0,1))
-            del_btn.bind(on_press=lambda x, f=fid: self.delete_file(f))
-            row.add_widget(btn)
-            row.add_widget(del_btn)
-            self.list_layout.add_widget(row)
+function view(id){
+ fetch("/view/"+id).then(r=>r.json()).then(d=>{
+  document.getElementById("preview").src=d.data;
+ });
+}
 
-    def pick_file(self, inst):
-        filechooser.open_file(on_selection=self.handle_pick)
+function lock(){location.reload();}
+</script>
 
-    def handle_pick(self, selection):
-        if selection:
-            fid = CryptoEngine.encrypt_file(selection[0], App.get_running_app().key)
-            self.settings.add_to_vault(selection[0], fid)
-            self.refresh()
+</body>
+</html>
+"""
 
-    def view(self, fid):
-        try:
-            data = CryptoEngine.decrypt_file(fid, App.get_running_app().key)
-            ext = self.settings.encrypted_file_map[fid]['ext']
-            img = CoreImage(io.BytesIO(data), ext=ext)
-            self.preview.texture = img.texture
-        except Exception as e: print(f"View Error: {e}")
+# ---------------- ROUTES ----------------
+@app.route("/")
+def home():
+    return render_template_string(HTML)
 
-    def delete_file(self, fid):
-        path = os.path.join(VAULT_FOLDER, fid + ".enc")
-        if os.path.exists(path): os.remove(path)
-        del self.settings.encrypted_file_map[fid]
-        self.settings.save()
-        self.preview.texture = None
-        self.refresh()
+@app.route("/calc", methods=["POST"])
+def calc():
+    exp = request.json["exp"]
+    if exp == PASSCODE:
+        return jsonify({"vault": True})
+    try:
+        return jsonify({"result": eval(exp)})
+    except:
+        return jsonify({"result": "Error"})
 
-    def on_lock(self, inst):
-        App.get_running_app().key = None
-        self.preview.texture = None
-        self.manager.current = 'calculator'
+@app.route("/upload", methods=["POST"])
+def upload():
+    data = request.json["data"].split(",")[1]
+    raw = base64.b64decode(data)
 
-# --- Main App ---
-class VaultApp(App):
-    def build(self):
-        self.title = "Calculator"
-        self.key = None
-        self.settings = AppSettings()
-        sm = ScreenManager(transition=FadeTransition())
-        sm.add_widget(CalculatorScreen(self.settings, name='calculator'))
-        sm.add_widget(VaultScreen(self.settings, name='vault'))
-        return sm
+    fid = encrypt_file(raw, key)
+    settings["files"][fid] = f"file_{len(settings['files'])}"
+    save_settings(settings)
 
-if __name__ == '__main__':
-    VaultApp().run()
+    return jsonify({"ok": True})
 
+@app.route("/files")
+def files():
+    return jsonify(settings["files"])
 
+@app.route("/view/<fid>")
+def view(fid):
+    raw = decrypt_file(fid, key)
+    encoded = base64.b64encode(raw).decode()
+    return jsonify({"data": "data:image/png;base64," + encoded})
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    app.run(debug=True)
 
