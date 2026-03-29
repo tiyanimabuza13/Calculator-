@@ -1,197 +1,177 @@
+import tkinter as tk
+from tkinter import messagebox
+import json
+import os
 
-from flask import Flask, request, jsonify, render_template_string
-import os, base64, json, datetime
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
-from Crypto.Protocol.KDF import PBKDF2
-from Crypto.Hash import SHA256
+# ---------------------------
+# FILES
+# ---------------------------
+USER_FILE = "users.json"
+HISTORY_FILE = "history.txt"
+VAULT_FILE = "vault.txt"
 
-app = Flask(__name__)
+# ---------------------------
+# BASIC STORAGE
+# ---------------------------
+def load_users():
+    if not os.path.exists(USER_FILE):
+        return {}
+    with open(USER_FILE, "r") as f:
+        return json.load(f)
 
-# ---------------- CONFIG ----------------
-SETTINGS_FILE = ".app_metadata.json"
-VAULT_FOLDER = "vault_storage"
-PASSCODE = "1234"
+def save_users(users):
+    with open(USER_FILE, "w") as f:
+        json.dump(users, f)
 
-if not os.path.exists(VAULT_FOLDER):
-    os.makedirs(VAULT_FOLDER)
+# ---------------------------
+# LOGIN SYSTEM
+# ---------------------------
+def register():
+    username = user_entry.get()
+    password = pass_entry.get()
 
-# ---------------- CRYPTO ----------------
-def derive_key(passcode, salt):
-    return PBKDF2(passcode, salt, dkLen=32, count=100000, hmac_hash_module=SHA256)
+    users = load_users()
 
-def encrypt_file(data, key):
-    file_id = base64.urlsafe_b64encode(get_random_bytes(8)).decode()
-    iv = get_random_bytes(12)
-    cipher = AES.new(key, AES.MODE_GCM, nonce=iv)
-    encrypted, tag = cipher.encrypt_and_digest(data)
+    if username in users:
+        messagebox.showerror("Error", "User already exists")
+    else:
+        users[username] = password
+        save_users(users)
+        messagebox.showinfo("Success", "Registered successfully")
 
-    with open(f"{VAULT_FOLDER}/{file_id}.bin", "wb") as f:
-        f.write(iv + tag + encrypted)
+def login():
+    username = user_entry.get()
+    password = pass_entry.get()
 
-    return file_id
+    users = load_users()
 
-def decrypt_file(file_id, key):
-    with open(f"{VAULT_FOLDER}/{file_id}.bin", "rb") as f:
-        iv = f.read(12)
-        tag = f.read(16)
+    if username in users and users[username] == password:
+        messagebox.showinfo("Success", "Login successful")
+        open_calculator()
+    else:
+        messagebox.showerror("Error", "Invalid login")
+
+# ---------------------------
+# CALCULATOR WINDOW
+# ---------------------------
+def open_calculator():
+    calc = tk.Toplevel(root)
+    calc.title("Smart Calculator")
+    calc.geometry("300x450")
+    calc.configure(bg="#1e1e1e")
+
+    expression = ""
+
+    entry = tk.Entry(calc, font=("Arial", 18), bg="#333", fg="white", bd=0)
+    entry.pack(fill="both", padx=10, pady=10)
+
+    def press(value):
+        nonlocal expression
+        expression += str(value)
+        entry.delete(0, tk.END)
+        entry.insert(0, expression)
+
+    def equal():
+        nonlocal expression
+        try:
+            result = str(eval(expression))
+            save_history(expression + " = " + result)
+            entry.delete(0, tk.END)
+            entry.insert(0, result)
+            expression = result
+        except:
+            entry.delete(0, tk.END)
+            entry.insert(0, "Error")
+            expression = ""
+
+    def clear():
+        nonlocal expression
+        expression = ""
+        entry.delete(0, tk.END)
+
+    # Buttons
+    buttons = [
+        '7','8','9','/',
+        '4','5','6','*',
+        '1','2','3','-',
+        '0','.','=','+'
+    ]
+
+    frame = tk.Frame(calc, bg="#1e1e1e")
+    frame.pack()
+
+    row = 0
+    col = 0
+
+    for b in buttons:
+        action = lambda x=b: press(x) if x != '=' else equal()
+        tk.Button(frame, text=b, width=5, height=2,
+                  command=action, bg="#333", fg="white").grid(row=row, column=col)
+        col += 1
+        if col > 3:
+            col = 0
+            row += 1
+
+    tk.Button(calc, text="Clear", command=clear, bg="red", fg="white").pack(fill="both")
+    tk.Button(calc, text="History", command=view_history).pack(fill="both")
+    tk.Button(calc, text="Vault 🔒", command=open_vault).pack(fill="both")
+
+# ---------------------------
+# HISTORY
+# ---------------------------
+def save_history(text):
+    with open(HISTORY_FILE, "a") as f:
+        f.write(text + "\n")
+
+def view_history():
+    if not os.path.exists(HISTORY_FILE):
+        messagebox.showinfo("History", "No history yet")
+        return
+
+    with open(HISTORY_FILE, "r") as f:
         data = f.read()
 
-    cipher = AES.new(key, AES.MODE_GCM, nonce=iv)
-    return cipher.decrypt_and_verify(data, tag)
+    messagebox.showinfo("History", data)
 
-# ---------------- SETTINGS ----------------
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        return json.load(open(SETTINGS_FILE))
-    else:
-        data = {"salt": base64.b64encode(get_random_bytes(16)).decode(), "files": {}}
-        json.dump(data, open(SETTINGS_FILE, "w"))
-        return data
+# ---------------------------
+# VAULT (SECRET STORAGE)
+# ---------------------------
+def open_vault():
+    vault = tk.Toplevel(root)
+    vault.title("Secure Vault")
+    vault.geometry("300x300")
 
-def save_settings(data):
-    json.dump(data, open(SETTINGS_FILE, "w"))
+    text = tk.Text(vault)
+    text.pack()
 
-settings = load_settings()
-salt = base64.b64decode(settings["salt"])
-key = derive_key(PASSCODE, salt)
+    if os.path.exists(VAULT_FILE):
+        with open(VAULT_FILE, "r") as f:
+            text.insert("1.0", f.read())
 
-# ---------------- UI ----------------
-HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<title>RandyX Vault</title>
-<style>
-body {background:#111;color:white;text-align:center;font-family:Arial;}
-button{width:60px;height:60px;margin:5px;font-size:20px;}
-input{width:240px;height:40px;font-size:20px;text-align:right;}
-.hidden{display:none;}
-img{max-width:200px;margin-top:10px;}
-</style>
-</head>
-<body>
+    def save():
+        with open(VAULT_FILE, "w") as f:
+            f.write(text.get("1.0", tk.END))
+        messagebox.showinfo("Saved", "Vault saved")
 
-<h2>🔥 Calculator</h2>
-<input id="display" readonly><br>
+    tk.Button(vault, text="Save", command=save).pack()
 
-<div id="calc">
-<button onclick="p('7')">7</button>
-<button onclick="p('8')">8</button>
-<button onclick="p('9')">9</button>
-<button onclick="p('/')">/</button><br>
-<button onclick="p('4')">4</button>
-<button onclick="p('5')">5</button>
-<button onclick="p('6')">6</button>
-<button onclick="p('*')">*</button><br>
-<button onclick="p('1')">1</button>
-<button onclick="p('2')">2</button>
-<button onclick="p('3')">3</button>
-<button onclick="p('-')">-</button><br>
-<button onclick="p('0')">0</button>
-<button onclick="calc()">=</button>
-<button onclick="clr()">C</button>
-<button onclick="p('+')">+</button>
-</div>
+# ---------------------------
+# MAIN LOGIN UI
+# ---------------------------
+root = tk.Tk()
+root.title("Secure App Login")
+root.geometry("300x200")
+root.configure(bg="#121212")
 
-<div id="vault" class="hidden">
-<h2>🔐 Vault</h2>
-<input type="file" id="file"><br><br>
-<button onclick="upload()">Hide File</button>
-<button onclick="lock()">Lock</button>
+tk.Label(root, text="Username", fg="white", bg="#121212").pack()
+user_entry = tk.Entry(root)
+user_entry.pack()
 
-<div id="files"></div>
-<img id="preview">
-</div>
+tk.Label(root, text="Password", fg="white", bg="#121212").pack()
+pass_entry = tk.Entry(root, show="*")
+pass_entry.pack()
 
-<script>
-let exp="";
+tk.Button(root, text="Login", command=login).pack(pady=5)
+tk.Button(root, text="Register", command=register).pack()
 
-function p(v){exp+=v;display.value=exp;}
-function clr(){exp="";display.value="";}
-function calc(){
- fetch("/calc",{method:"POST",headers:{'Content-Type':'application/json'},
- body:JSON.stringify({exp:exp})})
- .then(r=>r.json()).then(d=>{
-  if(d.vault){document.getElementById("calc").style.display="none";
-              document.getElementById("vault").classList.remove("hidden");
-              loadFiles();}
-  else display.value=d.result;
-  exp="";
- });
-}
-
-function upload(){
- let f=document.getElementById("file").files[0];
- let reader=new FileReader();
- reader.onload=function(){
-  fetch("/upload",{method:"POST",headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({data:reader.result})})
-  .then(()=>loadFiles());
- };
- reader.readAsDataURL(f);
-}
-
-function loadFiles(){
- fetch("/files").then(r=>r.json()).then(d=>{
-  let html="";
-  for(let f in d){
-    html+=`<button onclick="view('${f}')">${d[f]}</button>`;
-  }
-  document.getElementById("files").innerHTML=html;
- });
-}
-
-function view(id){
- fetch("/view/"+id).then(r=>r.json()).then(d=>{
-  document.getElementById("preview").src=d.data;
- });
-}
-
-function lock(){location.reload();}
-</script>
-
-</body>
-</html>
-"""
-
-# ---------------- ROUTES ----------------
-@app.route("/")
-def home():
-    return render_template_string(HTML)
-
-@app.route("/calc", methods=["POST"])
-def calc():
-    exp = request.json["exp"]
-    if exp == PASSCODE:
-        return jsonify({"vault": True})
-    try:
-        return jsonify({"result": eval(exp)})
-    except:
-        return jsonify({"result": "Error"})
-
-@app.route("/upload", methods=["POST"])
-def upload():
-    data = request.json["data"].split(",")[1]
-    raw = base64.b64decode(data)
-
-    fid = encrypt_file(raw, key)
-    settings["files"][fid] = f"file_{len(settings['files'])}"
-    save_settings(settings)
-
-    return jsonify({"ok": True})
-
-@app.route("/files")
-def files():
-    return jsonify(settings["files"])
-
-@app.route("/view/<fid>")
-def view(fid):
-    raw = decrypt_file(fid, key)
-    encoded = base64.b64encode(raw).decode()
-    return jsonify({"data": "data:image/png;base64," + encoded})
-
-# ---------------- RUN ----------------
-if __name__ == "__main__":
-    app.run(debug=True)
-
+root.mainloop()
